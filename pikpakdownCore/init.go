@@ -11,6 +11,7 @@ func FirstLogin() error {
 	if err != nil {
 		return err
 	}
+	//fmt.Printf("login_obj: %v\n", login)
 	//updateToken
 	err = configs.UpdateToken(login)
 	if err != nil {
