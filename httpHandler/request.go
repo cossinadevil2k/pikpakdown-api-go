@@ -2,11 +2,11 @@ package httpHandler
 
 import (
 	"fmt"
-	"github.com/mrxtryagin/pikpakdown-api-go/utils"
 	"io"
 	"net/http"
 	"path"
 	"sync"
+	"time"
 )
 
 // GeneralClient 通用 HTTP Client
@@ -63,7 +63,7 @@ func (c *HTTPClient) Request(method, target string, body io.Reader, opts ...Opti
 	// 创建请求客户端(提供timeout)
 	client := &http.Client{Timeout: options.timeout}
 	if options.proxyUrl != nil {
-		utils.Log().Debug("使用代理:%s", options.proxyUrl.String())
+		//utils.Log().Debug("使用代理:%s", options.proxyUrl.String())
 		client.Transport = &http.Transport{
 			Proxy: http.ProxyURL(options.proxyUrl),
 		}
@@ -116,16 +116,45 @@ func (c *HTTPClient) Request(method, target string, body io.Reader, opts ...Opti
 	//打印头部
 	//util.Log().Info("请求头为:%v", req.Header)
 	//util.Log().Info("url为:%s", req.URL.String())
-
-	// 发送请求
-	resp, err := client.Do(req)
-
-	//req.Close = true
-	if err != nil {
-		return &Response{Err: err}
+	//retry
+	retryCount := options.retryCount
+	retryFunc := options.retryFunc
+	if retryFunc == nil {
+		retryFunc = func(repose *http.Response, otherError error) bool {
+			if otherError != nil {
+				return false
+			}
+			return repose.ContentLength == -1
+		}
 	}
 
-	return &Response{Err: nil, Response: resp}
+	if retryCount > 0 && retryFunc != nil {
+		var err error
+		var resp *http.Response
+		errorCount := 1
+		for retryCount > 0 {
+			resp, err = client.Do(req)
+			if !retryFunc(resp, err) {
+				break
+			}
+			time.Sleep(time.Second * 2)
+			retryCount--
+			fmt.Printf("errorCount %d retry_left %d,error:%s\n", errorCount, retryCount, err.Error())
+			errorCount++
+		}
+		return &Response{Err: err, Response: resp}
+
+	} else {
+		// 发送请求
+		resp, err := client.Do(req)
+		//req.Close = true
+		if err != nil {
+			return &Response{Err: err}
+		}
+
+		return &Response{Err: nil, Response: resp}
+	}
+
 }
 
 //Get

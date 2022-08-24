@@ -6,6 +6,7 @@ import (
 	"io"
 	"io/ioutil"
 	"net/http"
+	"time"
 )
 
 // Response 请求的响应或错误信息
@@ -19,7 +20,25 @@ func (resp *Response) GetResponse() ([]byte, error) {
 	if resp.Err != nil {
 		return nil, resp.Err
 	}
-	respBody, err := ioutil.ReadAll(resp.Response.Body)
+	var (
+		respBody []byte
+		err      error
+	)
+	retry := 3
+	errorCount := 1
+	for retry > 0 {
+		respBody, err = ioutil.ReadAll(resp.Response.Body)
+		if err == nil {
+			break
+		} else {
+			retry--
+			fmt.Printf("errorCount %d retry_left %d,error:%s\n", errorCount, retry, err.Error())
+			errorCount++
+			time.Sleep(1 * time.Second)
+		}
+
+	}
+
 	_ = resp.Response.Body.Close()
 
 	return respBody, err

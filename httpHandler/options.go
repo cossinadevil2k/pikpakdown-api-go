@@ -25,6 +25,8 @@ type options struct {
 	//slaveNodeID   string
 	queryString string
 	proxyUrl    *url.URL
+	retryCount  int
+	retryFunc   func(repose *http.Response, otherError error) bool
 }
 
 type optionFunc func(*options)
@@ -121,5 +123,18 @@ func WithProxy(proxyUrl string) Option {
 func WithRedirect(isRedirect bool) Option {
 	return optionFunc(func(o *options) {
 		o.isRedirect = isRedirect
+	})
+}
+
+func WithRetry(retryCount int, retryFunc func(repose *http.Response, otherError error) bool) Option {
+	return optionFunc(func(o *options) {
+		o.retryCount = retryCount
+		o.retryFunc = retryFunc
+	})
+}
+
+func WithOnlyRetry(retryCount int) Option {
+	return optionFunc(func(o *options) {
+		o.retryCount = retryCount
 	})
 }

@@ -77,6 +77,17 @@ const (
 	infoZipUnixExtraID = 0x5855 // Info-ZIP Unix extension
 )
 
+//InitArgs 初始化参数
+type InitArgs struct {
+	IsZip64              bool  // 是否是zip64(从大小上来判断)
+	TotalSize            int64 //文件总大小
+	EOCDSize             int64 // eocd大小
+	CDSize               int64 // center_directory大小
+	Zip64EocdRecordSize  int64 // ZIP64_EOCD_RECORD_SIZE
+	Zip64EocdLocatorSize int64 // ZIP64_EOCD_LOCATOR_SIZE
+	ExtraSize            int64 // 额外部分大小 如果是普通zip 则这里为 central_directory + eocdRecord 如果是zip64 则为 central_directory + zip64_eocd_record + zip64_eocd_locator + eocd_record
+}
+
 // FileHeader describes a file within a zip file.
 // See the zip spec for details.
 type FileHeader struct {

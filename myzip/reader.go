@@ -82,6 +82,7 @@ func OpenReader(name string) (*ReadCloser, error) {
 
 // NewReader returns a new Reader reading from r, which is assumed to
 // have the given size in bytes.
+// 兼顾 全量读取 已经 小于4G的分批读取
 func NewReader(r io.ReaderAt, size int64) (*Reader, error) {
 	if size < 0 {
 		return nil, errors.New("zip: size cannot be negative")
@@ -94,6 +95,7 @@ func NewReader(r io.ReaderAt, size int64) (*Reader, error) {
 }
 
 func (z *Reader) init(r io.ReaderAt, size int64) error {
+	//原本的size 其实是这里的extraSize
 	// 寻找并获取 ecod信息
 	end, err := readDirectoryEnd(r, size)
 	if err != nil {
@@ -123,6 +125,87 @@ func (z *Reader) init(r io.ReaderAt, size int64) error {
 	trueDirectoryOffset := int64(end.DirectoryOffset)
 	// 如果偏移量超过了size 并且 size = cd + eocd(22 | 48?),则从0来读 todo: 可能有问题
 	if trueDirectoryOffset > size {
+		trueDirectoryOffset = 0
+	}
+	if _, err = rs.Seek(trueDirectoryOffset, io.SeekStart); err != nil {
+		return err
+	}
+	buf := bufio.NewReader(rs)
+
+	// The count of files inside a zip is truncated to fit in a uint16.
+	// Gloss over this by reading headers until we encounter
+	// a bad one, and then only report an ErrFormat or UnexpectedEOF if
+	// the file count modulo 65536 is incorrect.
+	var fileCompressedSize64 uint64
+	var fileUncompressedSize64 uint64
+	for {
+		f := &File{Zip: z, Zipr: r}
+		err = readDirectoryHeader(f, buf)
+		if err == ErrFormat || err == io.ErrUnexpectedEOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		z.File = append(z.File, f)
+		fileCompressedSize64 += f.CompressedSize64
+		fileUncompressedSize64 += f.UncompressedSize64
+	}
+	z.FileCompressedSize64 = fileCompressedSize64
+	z.FileUncompressedSize64 = fileUncompressedSize64
+
+	if uint16(len(z.File)) != uint16(end.DirectoryRecords) { // only compare 16 bits here
+		// Return the readDirectoryHeader error if we read
+		// the wrong number of directory entries.
+		return err
+	}
+	return nil
+}
+
+//NewReaderFromArgs 专门为 流式阅读而生的Reader
+func NewReaderFromArgs(r io.ReaderAt, args *InitArgs) (*Reader, error) {
+	if args.ExtraSize < 0 {
+		return nil, errors.New("zip: size cannot be negative")
+	}
+	zr := new(Reader)
+	if err := zr.initFromArgs(r, args); err != nil {
+		return nil, err
+	}
+	return zr, nil
+}
+
+func (z *Reader) initFromArgs(r io.ReaderAt, args *InitArgs) error {
+	extraSize := args.ExtraSize
+	//原本的size 其实是这里的extraSize
+	// 寻找并获取 ecod信息
+	end, err := readDirectoryEndFromArgs(r, args)
+	if err != nil {
+		return err
+	}
+	z.EOCD = end
+	z.R = r
+	// Since the number of directory records is not validated, it is not
+	// safe to preallocate z.File without first checking that the specified
+	// number of files is reasonable, since a malformed archive may
+	// indicate it contains up to 1 << 128 - 1 files. Since each file has a
+	// header which will be _at least_ 30 bytes(每个文件的头至少有30个字节) we can safely preallocate
+	// if (data size / 30) >= end.DirectoryRecords.
+	//todo: 这里应该是通过估计 算出来是否需要分配这些文件? 暂不做处理
+	// After all the central directory entries comes the end of central directory (EOCD) record, which marks the end of the ZIP file: 这话感觉是 cd + ecode size
+	// 如果是通过估计的话 应该是 size - cd_size - ecod_size 才是剩下的size的才对? 是的 为什么这里只是-cd_size? 还是说 这个地方的 DirectorySize =  cd_size +   ecod_size
+	if end.DirectorySize < uint64(extraSize) && (uint64(extraSize)-end.DirectorySize)/30 >= end.DirectoryRecords {
+		z.File = make([]*File, 0, end.DirectoryRecords)
+	}
+	//评论
+	z.Comment = end.Comment
+
+	// 这个地方应该是在找cd的数据
+	rs := io.NewSectionReader(r, 0, extraSize)
+	// 指针位置修改到 cd的开始位置为止
+	// 这里应该是从0开始往后读,默认实现是从 end.DirectoryOffset 开始往后读
+	trueDirectoryOffset := int64(end.DirectoryOffset)
+	// 如果偏移量超过了size 并且 size = cd + eocd(22 | 48?),则从0来读 todo: 可能有问题
+	if trueDirectoryOffset > extraSize {
 		trueDirectoryOffset = 0
 	}
 	if _, err = rs.Seek(trueDirectoryOffset, io.SeekStart); err != nil {
@@ -566,9 +649,84 @@ func readDirectoryEnd(r io.ReaderAt, size int64) (dir *DirectoryEnd, err error) 
 	// These values mean that the file can be a zip64 file
 	// 判断是否要走 zip64的逻辑 如果是的话 覆盖 d的内容
 	if d.DirectoryRecords == 0xffff || d.DirectorySize == 0xffff || d.DirectoryOffset == 0xffffffff {
+		// relative offset of the zip64 end of central directory record == zip64_eocd_record_start
 		p, err := findDirectory64End(r, directoryEndOffset)
 		if err == nil && p >= 0 {
+			// 这里的p 是 读出来的start 需要进行改变,否则会有问题
 			err = readDirectory64End(r, p, d)
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// Make sure DirectoryOffset points to somewhere in our file. todo: 不需要确保DirectoryOffset在整个文件里的位置,减少读取的范围
+	//if o := int64(d.DirectoryOffset); o < 0 || o >= size {
+	//	return nil, ErrFormat
+	//}
+	o := int64(d.DirectoryOffset)
+	if o < 0 {
+		return nil, ErrFormat
+	}
+	return d, nil
+}
+
+func readDirectoryEndFromArgs(r io.ReaderAt, args *InitArgs) (dir *DirectoryEnd, err error) {
+	// look for directoryEndSignature in the last 1k, then in the last 65k
+	extraSize := args.ExtraSize
+	var buf []byte
+	// 寻找 eocd偏移的位置
+	var directoryEndOffset int64
+	for i, bLen := range []int64{1024, 65 * 1024} {
+		if bLen > extraSize {
+			bLen = extraSize
+		}
+		buf = make([]byte, int(bLen))
+		if _, err := r.ReadAt(buf, extraSize-bLen); err != nil && err != io.EOF {
+			return nil, err
+		}
+		if p := findSignatureInBlock(buf); p >= 0 {
+			buf = buf[p:]
+			directoryEndOffset = extraSize - bLen + int64(p)
+			break
+		}
+		if i == 1 || bLen == extraSize {
+			return nil, ErrFormat
+		}
+	}
+
+	// read header into struct
+	// 跳过eocd开头的标志(非zip64一共22个)
+	b := readBuf(buf[4:]) // skip signature
+	d := &DirectoryEnd{
+		DiskNbr:            uint32(b.uint16()), //Number of this disk (or 0xffff for ZIP64)
+		DirDiskNbr:         uint32(b.uint16()), //Disk where central directory starts (or 0xffff for ZIP64)
+		DirRecordsThisDisk: uint64(b.uint16()), //Number of central directory records on this disk (or 0xffff for ZIP64)
+		DirectoryRecords:   uint64(b.uint16()), //Total number of central directory records (or 0xffff for ZIP64) cd的总记录数
+		DirectorySize:      uint64(b.uint32()), //Size of central directory (bytes) (or 0xffffffff for ZIP64) cd的大小
+		DirectoryOffset:    uint64(b.uint32()), //Offset of start of central directory, relative to start of archive (or 0xffffffff for ZIP64 cd相对于整个文件的偏移
+		CommentLen:         b.uint16(),         //Comment长度
+	}
+	// judge Comment length
+	l := int(d.CommentLen)
+	if l > len(b) {
+		return nil, errors.New("zip: invalid Comment length")
+	}
+	d.Comment = string(b[:l])
+
+	// These values mean that the file can be a zip64 file
+	// 判断是否要走 zip64的逻辑 如果是的话 覆盖 d的内容
+	if d.DirectoryRecords == 0xffff || d.DirectorySize == 0xffff || d.DirectoryOffset == 0xffffffff {
+		// relative offset of the zip64 end of central directory record == zip64_eocd_record_start
+		p, err := findDirectory64End(r, directoryEndOffset)
+		if err == nil && p >= 0 {
+			// 这里的p 是 读出来的start 需要进行改变,否则会有问题
+			//todo: 将p改变为对应的实际的偏移位置 也就是 0 + cd的size
+			if p > extraSize {
+				p = 0 + args.CDSize
+			}
+			err = readDirectory64End(r, p, d)
+
 		}
 		if err != nil {
 			return nil, err
