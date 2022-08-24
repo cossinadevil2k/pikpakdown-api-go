@@ -20,6 +20,10 @@ import (
 	"time"
 )
 
+const (
+	newFirstOffest = 0 // 新的Offest为0
+)
+
 var (
 	ErrFormat    = errors.New("zip: not a valid zip file")
 	ErrAlgorithm = errors.New("zip: unsupported compression algorithm")
@@ -206,7 +210,7 @@ func (z *Reader) initFromArgs(r io.ReaderAt, args *InitArgs) error {
 	trueDirectoryOffset := int64(end.DirectoryOffset)
 	// 如果偏移量超过了size 并且 size = cd + eocd(22 | 48?),则从0来读 todo: 可能有问题
 	if trueDirectoryOffset > extraSize {
-		trueDirectoryOffset = 0
+		trueDirectoryOffset = newFirstOffest
 	}
 	if _, err = rs.Seek(trueDirectoryOffset, io.SeekStart); err != nil {
 		return err

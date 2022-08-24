@@ -4,11 +4,11 @@ import (
 	"archive/zip"
 	"bytes"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"github.com/imroc/req/v3"
 	"github.com/mrxtryagin/pikpakdown-api-go/httpHandler"
 	"github.com/mrxtryagin/pikpakdown-api-go/myzip"
+	"golang.org/x/net/html/charset"
 	"golang.org/x/text/encoding/simplifiedchinese"
 	"golang.org/x/text/transform"
 	"io"
@@ -17,15 +17,16 @@ import (
 	"path/filepath"
 	"reflect"
 	"strconv"
+	"sync"
 	"time"
 )
 
 const (
-	EOCD_RECORD_SIZE        = 22
-	ZIP64_EOCD_RECORD_SIZE  = 56
-	ZIP64_EOCD_LOCATOR_SIZE = 20
+	EocdRecordSize       = 22
+	Zip64EocdRecordSize  = 56
+	Zip64EocdLocatorSize = 20
 
-	MAX_STANDARD_ZIP_SIZE = 4_294_967_295
+	MaxStandardZipSize = 4_294_967_295
 )
 
 func get_file_size(url string) int64 {
@@ -126,14 +127,14 @@ func BytesCombine(pBytes ...[]byte) []byte {
 
 func getZipReader(url string) *myzip.Reader {
 	total_size := get_file_size(url)
-	eocdRecord := getRangeBytes(url, total_size-EOCD_RECORD_SIZE, total_size)
+	eocdRecord := getRangeBytes(url, total_size-EocdRecordSize, total_size)
 	// 如果是普通zip
 	/*
 	   totalFetch: central_directory + eocd_record
 	*/
-	if total_size <= MAX_STANDARD_ZIP_SIZE {
+	if total_size <= MaxStandardZipSize {
 		cd_size, cd_start := parseToInt(eocdRecord)
-		total_extra_size := cd_size + EOCD_RECORD_SIZE
+		total_extra_size := cd_size + EocdRecordSize
 		central_directory := getRangeBytes(url, cd_start, cd_start+cd_size-1)
 		fmt.Printf("cd_start:%d,cd_size:%d,extra_size:%d\n,total_size:%d\n", cd_start, cd_size, total_extra_size, total_size)
 		total_meta := BytesCombine(*central_directory, *eocdRecord)
@@ -147,10 +148,10 @@ func getZipReader(url string) *myzip.Reader {
 		args := &myzip.InitArgs{
 			IsZip64:              false,
 			TotalSize:            total_size,
-			EOCDSize:             EOCD_RECORD_SIZE,
+			EOCDSize:             EocdRecordSize,
 			CDSize:               cd_size,
-			Zip64EocdRecordSize:  ZIP64_EOCD_RECORD_SIZE,
-			Zip64EocdLocatorSize: ZIP64_EOCD_LOCATOR_SIZE,
+			Zip64EocdRecordSize:  Zip64EocdRecordSize,
+			Zip64EocdLocatorSize: Zip64EocdLocatorSize,
 			ExtraSize:            int64(len(total_meta)),
 		}
 		reader, err := myzip.NewReaderFromArgs(bytes.NewReader(total_meta), args)
@@ -170,15 +171,15 @@ func getZipReader(url string) *myzip.Reader {
 			    totalFetch: central_directory + zip64_eocd_record + zip64_eocd_locator + eocd_record
 		*/
 		//如果是zip64 超过4G的zip,还需要请求剩余的eocd
-		zip64_eocd_record_start := total_size - (EOCD_RECORD_SIZE + ZIP64_EOCD_LOCATOR_SIZE + ZIP64_EOCD_RECORD_SIZE)
+		zip64_eocd_record_start := total_size - (EocdRecordSize + Zip64EocdLocatorSize + Zip64EocdRecordSize)
 		zip64_eocd_record := getRangeBytes(url,
 			zip64_eocd_record_start,
-			zip64_eocd_record_start+ZIP64_EOCD_RECORD_SIZE-1,
+			zip64_eocd_record_start+Zip64EocdRecordSize-1,
 		)
-		zip64_eocd_locator_start := total_size - (EOCD_RECORD_SIZE + ZIP64_EOCD_LOCATOR_SIZE)
+		zip64_eocd_locator_start := total_size - (EocdRecordSize + Zip64EocdLocatorSize)
 		zip64_eocd_locator := getRangeBytes(url,
 			zip64_eocd_locator_start,
-			zip64_eocd_locator_start+ZIP64_EOCD_LOCATOR_SIZE-1,
+			zip64_eocd_locator_start+Zip64EocdLocatorSize-1,
 		)
 
 		cd_size, cd_start := parseToInt64(zip64_eocd_record)
@@ -188,10 +189,10 @@ func getZipReader(url string) *myzip.Reader {
 		args := &myzip.InitArgs{
 			IsZip64:              true,
 			TotalSize:            total_size,
-			EOCDSize:             EOCD_RECORD_SIZE,
+			EOCDSize:             EocdRecordSize,
 			CDSize:               cd_size,
-			Zip64EocdRecordSize:  ZIP64_EOCD_RECORD_SIZE,
-			Zip64EocdLocatorSize: ZIP64_EOCD_LOCATOR_SIZE,
+			Zip64EocdRecordSize:  Zip64EocdRecordSize,
+			Zip64EocdLocatorSize: Zip64EocdLocatorSize,
 			ExtraSize:            int64(len(total_meta)),
 		}
 
@@ -203,80 +204,15 @@ func getZipReader(url string) *myzip.Reader {
 	}
 
 }
-func changeBytes(input, fromBytes *[]byte, start int64) {
-	for _, b := range *fromBytes {
-		(*input)[start] = b
-		start++
-	}
-}
 
-func extractPartFilesTo(url string, reader *myzip.Reader, startNo, endNo int, targetPath string) {
-	files := reader.File
-	// 找到对应的下标
-	startIndex := startNo - 1
-	endIndex := endNo - 1
-	//判断下标是否越界
-	lastIndex := len(files) - 1
-	if startIndex < 0 || endIndex < 0 {
-		panic(errors.New("start,end must be >= 0 "))
+func extractPartFilesTo(url string, reader *myzip.Reader, targetPath string, startNo, endNo int) {
+	var input []int
+	for i := startNo; i <= endNo; i++ {
+		input = append(input, i)
 	}
-	if endIndex < startIndex {
-		panic(errors.New("start > end"))
-	}
-	if startIndex > lastIndex || endIndex > lastIndex {
-		panic(errors.New("index out of range"))
-	}
-	/*
-		寻找满足条件的文件,算法如下:
-		1. startIndex < endIndex < lastIndex:
-		 抽取 start 到 end+1个的bytes进行解压
-		2. startIndex < endIndex = lastIndex:
-		 因为end 就是最后一个 没有下一个偏移了 所以用eocd的值进行,也就是抽取 start 到 ecod.DirectoryOffset
-		3.  startIndex = endIndex:
-		 start 与 end 是同一个 start 同一
-	*/
-	cdOffest := reader.EOCD.DirectoryOffset
-	token := make(chan int, 200)
-	if startIndex < endIndex {
-		if endIndex < lastIndex {
-			rangeFiles := files[startIndex : endIndex+1]
-			for i := 0; i < len(rangeFiles)-1; i++ {
-				go func(i int) {
-					token <- 1
-					//fmt.Printf("第%d次\n", i)
-					f := getNewFIle(url, rangeFiles[i], rangeFiles[i].HeaderOffset, rangeFiles[i+1].HeaderOffset-1)
-					unzipFile(f, targetPath)
-					<-token
-				}(i)
-				//fmt.Printf("第%d次,start:%d end:%d \n", i, rangeFiles[i].HeaderOffset, rangeFiles[i+1].HeaderOffset-1)
-				//f := getNewFIle(url, rangeFiles[i], rangeFiles[i].HeaderOffset, rangeFiles[i+1].HeaderOffset-1)
-				//unzipFile(f, targetPath)
-			}
-		} else if endIndex == lastIndex {
-			rangeFiles := files[startIndex : endIndex+1]
-			for i := 0; i < len(rangeFiles); i++ {
-				go func(i int) {
-					token <- 1
-					var endOffset int64
-					//如果是最后一个
-					if i == len(rangeFiles)-1 {
-						endOffset = int64(cdOffest)
-					} else {
-						endOffset = rangeFiles[i+1].HeaderOffset - 1
-					}
-					f := getNewFIle(url, rangeFiles[i], rangeFiles[i].HeaderOffset, endOffset)
-					unzipFile(f, targetPath)
-					<-token
-				}(i)
-			}
-		}
-	} else {
-		rangeFiles := files[startIndex : endIndex+2]
-		for i := 0; i < len(rangeFiles)-1; i++ {
-			f := getNewFIle(url, rangeFiles[i], rangeFiles[i].HeaderOffset, rangeFiles[i+1].HeaderOffset-1)
-			unzipFile(f, targetPath)
-		}
-	}
+	fmt.Printf("input:%+v\n", input)
+	unzipFiles(url, reader, targetPath, input...)
+
 }
 
 func unzipFiles(url string, reader *myzip.Reader, targetPath string, nos ...int) {
@@ -285,15 +221,18 @@ func unzipFiles(url string, reader *myzip.Reader, targetPath string, nos ...int)
 	}
 	lastIndex := len(reader.File) - 1
 	token := make(chan int, 20)
+	var wg sync.WaitGroup
 	// ecod的偏移
 	eocdOffest := reader.EOCD.DirectoryOffset
 	for _, no := range nos {
 		// 从no获得下标
 		noIndex := no - 1
 		if noIndex < 0 || noIndex > lastIndex {
-			panic("noIndex < 0 or noIndex > lastIndex,noIndex is invalid")
+			panic(fmt.Sprintf("noIndex < 0 or noIndex > lastIndex,noIndex is invalid,index=%d", noIndex))
 		}
+		wg.Add(1)
 		go func(noIndex int) {
+			defer wg.Done()
 			// 令牌桶限制频率
 			token <- 1
 			nowFile := reader.File[noIndex]
@@ -311,6 +250,8 @@ func unzipFiles(url string, reader *myzip.Reader, targetPath string, nos ...int)
 			<-token
 		}(noIndex)
 	}
+	wg.Wait()
+	close(token)
 }
 
 func getNewFIle(url string, f *myzip.File, firstOffset, secondOffset int64) *myzip.File {
@@ -375,6 +316,10 @@ func unzipFile(f *myzip.File, dst string) {
 	if f.Flags == 0 {
 		//如果标致位是0  则是默认的本地编码   默认为gbk
 		i := bytes.NewReader([]byte(f.Name))
+
+		e, name, certain := charset.DetermineEncoding([]byte(f.Name), "text/html")
+		fmt.Printf("编码:%v\n名称:%s\n 确定: %t\n", e, name, certain)
+
 		decoder := transform.NewReader(i, simplifiedchinese.GB18030.NewDecoder())
 		content, _ := ioutil.ReadAll(decoder)
 		decodeName = string(content)
@@ -389,7 +334,7 @@ func unzipFile(f *myzip.File, dst string) {
 		fmt.Printf("成功创建文件夹%s", destination)
 		os.MkdirAll(destination, os.ModePerm)
 	} else {
-		//如果是文件夹套的文件
+		//如果是文件夹套的文件 先建文件夹
 		if err := os.MkdirAll(filepath.Dir(destination), os.ModePerm); err != nil {
 			panic(err)
 		}
@@ -443,7 +388,7 @@ func main() {
 	//extractPartZip(u1)
 	//fmt.Println(BytesCombine([]byte{1, 2, 3}, []byte{4, 5, 6}))
 	//u2 := "https://lgte-my.sharepoint.com/personal/mrx_lostknife_win/_layouts/15/download.aspx?UniqueId=26558f00-c9e9-484e-93e7-45d0d0b35db7&Translate=false&tempauth=eyJ0eXAiOiJKV1QiLCJhbGciOiJub25lIn0.eyJhdWQiOiIwMDAwMDAwMy0wMDAwLTBmZjEtY2UwMC0wMDAwMDAwMDAwMDAvbGd0ZS1teS5zaGFyZXBvaW50LmNvbUA2Nzg0NTYxYS1lNTJkLTRlZGUtYmY4Yy1lZjBmNjk0ZGU5ZjIiLCJpc3MiOiIwMDAwMDAwMy0wMDAwLTBmZjEtY2UwMC0wMDAwMDAwMDAwMDAiLCJuYmYiOiIxNjYxMDAyNjQ1IiwiZXhwIjoiMTY2MTAwNjI0NSIsImVuZHBvaW50dXJsIjoiUm1YMFlFM3JzWFZnVU02UnhMQTgxTU1vb1RlK3huWlhHODQ1QnRWWGFibz0iLCJlbmRwb2ludHVybExlbmd0aCI6IjE0NSIsImlzbG9vcGJhY2siOiJUcnVlIiwiY2lkIjoiWW1WbFlUYzBZVEF0T0RobE5pMDBNMkkzTFRsak16RXRaVEEzT0dVNVl6QTBaV0l3IiwidmVyIjoiaGFzaGVkcHJvb2Z0b2tlbiIsInNpdGVpZCI6IlpUUmxZamt4TlRFdE0yUTVNeTAwWXpNM0xXRmhZVEV0TlRBeFpUTmtNMlpoTjJKayIsImFwcF9kaXNwbGF5bmFtZSI6ImNsb3VkcmV2ZSIsImdpdmVuX25hbWUiOiJyeCIsImZhbWlseV9uYW1lIjoibSIsImFwcGlkIjoiNjQ0NWJkNWItZjI1OS00YmY2LTgxMTItZGFjODA2N2RmZjM5IiwidGlkIjoiNjc4NDU2MWEtZTUyZC00ZWRlLWJmOGMtZWYwZjY5NGRlOWYyIiwidXBuIjoibXJ4QGxvc3RrbmlmZS53aW4iLCJwdWlkIjoiMTAwMzIwMDBBNzQ4Q0IzOCIsImNhY2hla2V5IjoiMGguZnxtZW1iZXJzaGlwfDEwMDMyMDAwYTc0OGNiMzhAbGl2ZS5jb20iLCJzY3AiOiJhbGxmaWxlcy53cml0ZSIsInR0IjoiMiIsInVzZVBlcnNpc3RlbnRDb29raWUiOm51bGwsImlwYWRkciI6IjIwLjE5MC4xNDQuMTcwIn0.amlyRHJRbjFhcFp4cVRxa1ZXR0NadlcwT1Jrem5CRWZzWHUvUlkxZkkwRT0&ApiVersion=2.0"
-	u1 := "https://ytplbi-my.sharepoint.com/personal/cp60007_ytplbi_onmicrosoft_com/_layouts/15/download.aspx?UniqueId=8c833a21-2051-422f-a54c-f72bd637d8ce&Translate=false&tempauth=eyJ0eXAiOiJKV1QiLCJhbGciOiJub25lIn0.eyJhdWQiOiIwMDAwMDAwMy0wMDAwLTBmZjEtY2UwMC0wMDAwMDAwMDAwMDAveXRwbGJpLW15LnNoYXJlcG9pbnQuY29tQGNkODJlZjE4LThlYWEtNGIzNy04NjhlLTA4YjFlNzZlNjkwNyIsImlzcyI6IjAwMDAwMDAzLTAwMDAtMGZmMS1jZTAwLTAwMDAwMDAwMDAwMCIsIm5iZiI6IjE2NjEyNDYwODkiLCJleHAiOiIxNjYxMjQ5Njg5IiwiZW5kcG9pbnR1cmwiOiJad25wUmRPbGk4eXVrU2RER0hMazhWdmdnWTNnT3lxNVl2bEUzaGwzK2swPSIsImVuZHBvaW50dXJsTGVuZ3RoIjoiMTYwIiwiaXNsb29wYmFjayI6IlRydWUiLCJjaWQiOiJOVE5pWWpsa1l6Y3RZMlU1TUMwMFltRmhMV0ZoT0dZdFlXSmtNalF5T0dVMk5tSmwiLCJ2ZXIiOiJoYXNoZWRwcm9vZnRva2VuIiwic2l0ZWlkIjoiTUdFeU5UQTRORGt0WTJRME15MDBZVFU1TFdJeFl6Z3RZek00TmpCbE5qazJNakl4IiwiYXBwX2Rpc3BsYXluYW1lIjoiY2xvdWRyZXZlIiwic2lnbmluX3N0YXRlIjoiW1wia21zaVwiXSIsImFwcGlkIjoiZGEyZDE3ZDUtMWZlNy00MTc3LWE2NjYtNjg5Njk5ODI0NzgzIiwidGlkIjoiY2Q4MmVmMTgtOGVhYS00YjM3LTg2OGUtMDhiMWU3NmU2OTA3IiwidXBuIjoiY3A2MDAwN0B5dHBsYmkub25taWNyb3NvZnQuY29tIiwicHVpZCI6IjEwMDMyMDAxNzRGRDZGRkQiLCJjYWNoZWtleSI6IjBoLmZ8bWVtYmVyc2hpcHwxMDAzMjAwMTc0ZmQ2ZmZkQGxpdmUuY29tIiwic2NwIjoiYWxsZmlsZXMud3JpdGUiLCJ0dCI6IjIiLCJ1c2VQZXJzaXN0ZW50Q29va2llIjpudWxsLCJpcGFkZHIiOiIyMC4xOTAuMTQ0LjE2OSJ9.aUZodEcvU2hVQjN4QVc4Z2JuU3RWUUZtSlZLNGYyOE4vMFNIYkp2Zkk0QT0&ApiVersion=2.0"
+	u1 := "https://ytplbi-my.sharepoint.com/personal/cp60007_ytplbi_onmicrosoft_com/_layouts/15/download.aspx?UniqueId=8c833a21-2051-422f-a54c-f72bd637d8ce&Translate=false&tempauth=eyJ0eXAiOiJKV1QiLCJhbGciOiJub25lIn0.eyJhdWQiOiIwMDAwMDAwMy0wMDAwLTBmZjEtY2UwMC0wMDAwMDAwMDAwMDAveXRwbGJpLW15LnNoYXJlcG9pbnQuY29tQGNkODJlZjE4LThlYWEtNGIzNy04NjhlLTA4YjFlNzZlNjkwNyIsImlzcyI6IjAwMDAwMDAzLTAwMDAtMGZmMS1jZTAwLTAwMDAwMDAwMDAwMCIsIm5iZiI6IjE2NjEzMjUyNTkiLCJleHAiOiIxNjYxMzI4ODU5IiwiZW5kcG9pbnR1cmwiOiJad25wUmRPbGk4eXVrU2RER0hMazhWdmdnWTNnT3lxNVl2bEUzaGwzK2swPSIsImVuZHBvaW50dXJsTGVuZ3RoIjoiMTYwIiwiaXNsb29wYmFjayI6IlRydWUiLCJjaWQiOiJPVEppWWpNMVlXRXRNemRtTVMwMFkySXpMVGsxTkdVdFpEWXlNVGRrWkRreE5XWTEiLCJ2ZXIiOiJoYXNoZWRwcm9vZnRva2VuIiwic2l0ZWlkIjoiTUdFeU5UQTRORGt0WTJRME15MDBZVFU1TFdJeFl6Z3RZek00TmpCbE5qazJNakl4IiwiYXBwX2Rpc3BsYXluYW1lIjoiY2xvdWRyZXZlIiwic2lnbmluX3N0YXRlIjoiW1wia21zaVwiXSIsImFwcGlkIjoiZGEyZDE3ZDUtMWZlNy00MTc3LWE2NjYtNjg5Njk5ODI0NzgzIiwidGlkIjoiY2Q4MmVmMTgtOGVhYS00YjM3LTg2OGUtMDhiMWU3NmU2OTA3IiwidXBuIjoiY3A2MDAwN0B5dHBsYmkub25taWNyb3NvZnQuY29tIiwicHVpZCI6IjEwMDMyMDAxNzRGRDZGRkQiLCJjYWNoZWtleSI6IjBoLmZ8bWVtYmVyc2hpcHwxMDAzMjAwMTc0ZmQ2ZmZkQGxpdmUuY29tIiwic2NwIjoiYWxsZmlsZXMud3JpdGUiLCJ0dCI6IjIiLCJ1c2VQZXJzaXN0ZW50Q29va2llIjpudWxsLCJpcGFkZHIiOiIyMC4xOTAuMTQ0LjE3MSJ9.d1RqYXhpMzJ0S3ZRNG83SVZiWWpHOWxiOC9pK1pqNG5hWTV2L2QrTjlzQT0&ApiVersion=2.0"
 	zipReader := getZipReader(u1)
 	//fmt.Println("file_tree:")
 	for index, file := range zipReader.File {
@@ -455,9 +400,6 @@ func main() {
 	//}
 	//fmt.Printf("reader:%+v\n", string(marshal))
 	folder := fmt.Sprintf("%s", strconv.Itoa(int(time.Now().Unix())))
-	unzipFiles(u1, zipReader, folder, 1, 3, 5, 6, 7, 8, 158)
-	for {
-
-	}
+	extractPartFilesTo(u1, zipReader, folder, 1, 2)
 
 }
