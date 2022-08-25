@@ -6,13 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"github.com/imroc/req/v3"
-	"golang.org/x/sync/errgroup"
 	"golang.org/x/text/encoding/simplifiedchinese"
 	"golang.org/x/text/transform"
 	"io"
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
@@ -230,49 +230,71 @@ func GetZipReaderFromUrl(url string) (*Reader, error) {
 
 }
 
-func UnZipFilesFromNumbers(url string, reader *Reader, targetPath string, nos ...int) error {
+func PrintZipFiles(reader *Reader) {
+	fmt.Println("Files Tree:")
+	fmt.Printf("%s | %s | %s | %s\n", "No.", "Name", "CompressedSize", "UncompressedSize")
+	for index, file := range reader.File {
+		fmt.Printf("%d | %s | %d | %d\n", index, file.Name, file.CompressedSize64, file.UncompressedSize64)
+	}
+	fmt.Printf("TotalCount:%d, TotalCompressedSize: %d TotalUncompressedSize: %d\n", len(reader.File), reader.FileCompressedSize64, reader.FileUncompressedSize64)
+}
+
+func UnZipFilesFromNumbers(url string, reader *Reader, targetPath string, nos ...int) (int64, error) {
 	if len(nos) == 0 {
-		return NoInputErr
+		return 0, NoInputErr
 	}
 	lastIndex := len(reader.File) - 1
 	token := make(chan int, 20)
-	group := new(errgroup.Group)
+	var wg sync.WaitGroup
+	var err error
 	// ecod的偏移
 	eocdOffest := reader.EOCD.DirectoryOffset
+	var total int64
 	for _, no := range nos {
+		wg.Add(1)
 		// 从no获得下标
 		noIndex := no - 1
 		if noIndex < 0 || noIndex > lastIndex {
-			return errors.New(fmt.Sprintf("noIndex < 0 or noIndex > lastIndex,noIndex is invalid,index=%d", noIndex))
+			return 0, errors.New(fmt.Sprintf("noIndex < 0 or noIndex > lastIndex,noIndex is invalid,index=%d", noIndex))
 		}
-		group.Go(func() error {
-			func(noIndex int) {
-				// 令牌桶限制频率
-				token <- 1
-				nowFile := reader.File[noIndex]
-				start := nowFile.HeaderOffset
-				var end int64
-				// 区分小于和等于的情况
-				if noIndex < lastIndex {
-					end = reader.File[noIndex+1].HeaderOffset - 1
-				} else if noIndex == lastIndex {
-					end = int64(eocdOffest - 1)
-				}
-				//如果是小于的,那直接取就行了 注意 左闭右闭 所以说是 start = 本文件的开始偏移 end = 下一个文件的开始偏移-1的区间
-				f, err := useOldFileGetFullNewFile(url, nowFile, start, end)
-				if err != nil {
-					return
-				}
-				unzipFile(f, targetPath)
-				<-token
-			}(noIndex)
-
-			return nil
-		})
+		go func(noIndex int) {
+			defer wg.Done()
+			// 令牌桶限制频率
+			token <- 1
+			nowFile := reader.File[noIndex]
+			start := nowFile.HeaderOffset
+			var end int64
+			// 区分小于和等于的情况
+			if noIndex < lastIndex {
+				end = reader.File[noIndex+1].HeaderOffset - 1
+			} else if noIndex == lastIndex {
+				end = int64(eocdOffest - 1)
+			}
+			//如果是小于的,那直接取就行了 注意 左闭右闭 所以说是 start = 本文件的开始偏移 end = 下一个文件的开始偏移-1的区间
+			f, err := useOldFileGetFullNewFile(url, nowFile, start, end)
+			if err != nil {
+				return
+			}
+			file, err := unzipFile(f, targetPath)
+			if err != nil {
+				return
+			}
+			total += file
+			<-token
+		}(noIndex)
 	}
 	wg.Wait()
 	close(token)
-	return nil
+	return total, err
+}
+
+func UnZipFilesFromRange(url string, reader *Reader, targetPath string, startNo, endNo int) (int64, error) {
+	var input []int
+	for i := startNo; i <= endNo; i++ {
+		input = append(input, i)
+	}
+	return UnZipFilesFromNumbers(url, reader, targetPath, input...)
+
 }
 
 //useOldFileGetFullNewFile 用旧的文件 + bytes 获得新的文件
