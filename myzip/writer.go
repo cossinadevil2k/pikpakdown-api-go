@@ -195,7 +195,7 @@ func (w *Writer) Close() error {
 	b.uint16(uint16(records))        // number of entries total
 	b.uint32(uint32(size))           // size of directory
 	b.uint32(uint32(offset))         // start of directory
-	b.uint16(uint16(len(w.comment))) // byte size of EOCD comment
+	b.uint16(uint16(len(w.comment))) // byte size of CD comment
 	if _, err := w.cw.Write(buf[:]); err != nil {
 		return err
 	}

@@ -43,7 +43,7 @@ type Reader struct {
 	// for use by the Open method.
 	fileListOnce sync.Once
 	fileList     []fileListEntry
-	EOCD         *DirectoryEnd
+	CD           *DirectoryEnd
 }
 
 // A ReadCloser is a Reader that must be closed when no longer needed.
@@ -105,7 +105,7 @@ func (z *Reader) init(r io.ReaderAt, size int64) error {
 	if err != nil {
 		return err
 	}
-	z.EOCD = end
+	z.CD = end
 	z.R = r
 	// Since the number of directory records is not validated, it is not
 	// safe to preallocate z.File without first checking that the specified
@@ -114,7 +114,7 @@ func (z *Reader) init(r io.ReaderAt, size int64) error {
 	// header which will be _at least_ 30 bytes(每个文件的头至少有30个字节) we can safely preallocate
 	// if (data size / 30) >= end.DirectoryRecords.
 	//todo: 这里应该是通过估计 算出来是否需要分配这些文件? 暂不做处理
-	// After all the central directory entries comes the end of central directory (EOCD) record, which marks the end of the ZIP file: 这话感觉是 cd + ecode size
+	// After all the central directory entries comes the end of central directory (CD) record, which marks the end of the ZIP file: 这话感觉是 cd + ecode size
 	// 如果是通过估计的话 应该是 size - cd_size - ecod_size 才是剩下的size的才对? 是的 为什么这里只是-cd_size? 还是说 这个地方的 DirectorySize =  cd_size +   ecod_size
 	if end.DirectorySize < uint64(size) && (uint64(size)-end.DirectorySize)/30 >= end.DirectoryRecords {
 		z.File = make([]*File, 0, end.DirectoryRecords)
@@ -186,7 +186,7 @@ func (z *Reader) initFromArgs(r io.ReaderAt, args *InitArgs) error {
 	if err != nil {
 		return err
 	}
-	z.EOCD = end
+	z.CD = end
 	z.R = r
 	// Since the number of directory records is not validated, it is not
 	// safe to preallocate z.File without first checking that the specified
@@ -195,7 +195,7 @@ func (z *Reader) initFromArgs(r io.ReaderAt, args *InitArgs) error {
 	// header which will be _at least_ 30 bytes(每个文件的头至少有30个字节) we can safely preallocate
 	// if (data size / 30) >= end.DirectoryRecords.
 	//todo: 这里应该是通过估计 算出来是否需要分配这些文件? 暂不做处理
-	// After all the central directory entries comes the end of central directory (EOCD) record, which marks the end of the ZIP file: 这话感觉是 cd + ecode size
+	// After all the central directory entries comes the end of central directory (CD) record, which marks the end of the ZIP file: 这话感觉是 cd + ecode size
 	// 如果是通过估计的话 应该是 size - cd_size - ecod_size 才是剩下的size的才对? 是的 为什么这里只是-cd_size? 还是说 这个地方的 DirectorySize =  cd_size +   ecod_size
 	if end.DirectorySize < uint64(extraSize) && (uint64(extraSize)-end.DirectorySize)/30 >= end.DirectoryRecords {
 		z.File = make([]*File, 0, end.DirectoryRecords)

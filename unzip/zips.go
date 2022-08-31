@@ -166,8 +166,8 @@ func getZipReader(url string) *myzip.Reader {
 				For the latter one,
 				the algorithm looks also the same.
 				The only difference is that you need to
-				fetch an extra ZIP64 EOCD record and a ZIP64 EOCD locator.
-				Then the four bytes blocks (CD+EOCD64 record+EOCD64 locator+EOCD) can be read and open as a ZIP file.
+				fetch an extra ZIP64 CD record and a ZIP64 CD locator.
+				Then the four bytes blocks (CD+EOCD64 record+EOCD64 locator+CD) can be read and open as a ZIP file.
 			    totalFetch: central_directory + zip64_eocd_record + zip64_eocd_locator + eocd_record
 		*/
 		//如果是zip64 超过4G的zip,还需要请求剩余的eocd
@@ -223,7 +223,7 @@ func unzipFiles(url string, reader *myzip.Reader, targetPath string, nos ...int)
 	token := make(chan int, 20)
 	var wg sync.WaitGroup
 	// ecod的偏移
-	eocdOffest := reader.EOCD.DirectoryOffset
+	eocdOffest := reader.CD.DirectoryOffset
 	for _, no := range nos {
 		// 从no获得下标
 		noIndex := no - 1
