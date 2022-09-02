@@ -2,6 +2,7 @@ package myzip
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -39,6 +40,7 @@ var (
 var (
 	UrlIsInvalid         = errors.New("url is invalid")
 	NoUnZipNumbersChoice = errors.New("no unzip numbers choice")
+	TimeOutErr           = errors.New("timeot error")
 )
 
 type UnzipProps struct {
@@ -92,7 +94,30 @@ func getFileSize(url string) (int64, error) {
 		return 0, UrlIsInvalid
 	}
 	return response.ContentLength, nil
+}
+func GetRealUrl(url string) (string, error) {
+	client2 := req.C().
+		SetTimeout(TimeOut).
+		SetCommonRetryFixedInterval(RetryFixedInterval).
+		SetCommonRetryCount(RetryCount).
+		AddCommonRetryCondition(RetryConditionForContentLength).
+		SetProxyURL(ProxyUrl).
+		SetRedirectPolicy(req.NoRedirectPolicy()).
+		DisableAutoReadResponse()
+	headers := map[string]string{
+		"range": fmt.Sprintf("bytes=%d-%d", 0, 1),
+	}
+	response, err := client2.R().
+		SetHeaders(headers).
+		Get(url)
+	if err != nil {
+		return url, err
+	}
+	if response.StatusCode == 302 || response.StatusCode == 303 {
+		return response.Header.Get("Location"), err
+	}
 
+	return url, err
 }
 
 func getRangeBytes(url string, start, end int64) (*[]byte, error) {
@@ -472,7 +497,6 @@ func (args *UnzipProps) Unzip(reader *Reader) (int64, *[]*ResultProps, error) {
 	url := args.Url
 	targetPath := args.TargetPath
 	charsetName := args.CharsetName
-	token := make(chan int, getSuitableTokenSize(int64(len(reader.File))))
 
 	var wg sync.WaitGroup
 	var wgResult sync.WaitGroup
@@ -490,60 +514,122 @@ func (args *UnzipProps) Unzip(reader *Reader) (int64, *[]*ResultProps, error) {
 		}
 		wgResult.Done()
 	}()
+
+	/**
+	todo: 目前关于token令牌限制问题:
+	1.直接做在go里面的 意思就是说 会起n个协程 前token 个可以获得到令牌 往下执行,其余的得排队等待之前的释放 -> token 写在go里面,外面用wg.Wait 阻塞
+	2. 使用select语句来阻塞而不是用go语句,所以我可以提前放一些到token,然后用select来阻塞,这样其实可以减少整体的协程数量 -> token 写在go外面 但是会被阻塞住,还可以设置整体超时的时间
+	*/
+	suitableToken := getSuitableTokenSize(int64(len(reader.File)))
+	token := make(chan int, suitableToken)
+	// 事先放入
+	for i := 0; i < suitableToken; i++ {
+		token <- i
+	}
 	for _, no := range numbers {
-		wg.Add(1)
 		// 从no获得下标
 		noIndex := no - 1
 		if noIndex < 0 || noIndex > lastIndex {
 			return 0, nil, errors.New(fmt.Sprintf("noIndex < 0 or noIndex > lastIndex,noIndex is invalid,index=%d", noIndex))
 		}
-		go func(noIndex int) {
-			defer wg.Done()
-			// 令牌桶限制频率
-			token <- 1
-			nowFile := reader.File[noIndex]
-			start := nowFile.HeaderOffset
-			var end int64
-			// 区分小于和等于的情况
-			if noIndex < lastIndex {
-				end = reader.File[noIndex+1].HeaderOffset - 1
-			} else if noIndex == lastIndex {
-				end = int64(eocdOffest - 1)
-			}
+		wg.Add(1)
+		select {
+		case <-token:
+			go func() {
+				defer func() {
+					token <- 1
+					wg.Done()
+				}()
+				//token <- 1
+				nowFile := reader.File[noIndex]
+				start := nowFile.HeaderOffset
+				var end int64
+				// 区分小于和等于的情况
+				if noIndex < lastIndex {
+					end = reader.File[noIndex+1].HeaderOffset - 1
+				} else if noIndex == lastIndex {
+					end = int64(eocdOffest - 1)
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), TimeOut)
+				defer cancel()
+				done := make(chan int, 1)
 
-			//如果是小于的,那直接取就行了 注意 左闭右闭 所以说是 start = 本文件的开始偏移 end = 下一个文件的开始偏移-1的区间
-			f, err := useOldFileGetFullNewFile(url, nowFile, start, end)
-			result := &ResultProps{
-				IsSuccess:         false,
-				SuccessHandleByte: 0,
-				Err:               err,
-				File:              f,
-				FileRangeStart:    start,
-				FileRangeEnd:      end,
-				CDStart:           eocdOffest,
-				ZipReader:         reader,
-				FileIndex:         noIndex,
-			}
-			if err != nil {
-				results <- result
-				return
-			}
+				/**
+				需要超时控制的协程,done <- 1 表示协程完成.
+				如果是一组的话 可以再在里面使用wait group
+				*/
+				go func() {
+					//如果是小于的,那直接取就行了 注意 左闭右闭 所以说是 start = 本文件的开始偏移 end = 下一个文件的开始偏移-1的区间
+					f, err := useOldFileGetFullNewFile(url, nowFile, start, end)
+					result := &ResultProps{
+						IsSuccess:         false,
+						SuccessHandleByte: 0,
+						Err:               err,
+						File:              f,
+						FileRangeStart:    start,
+						FileRangeEnd:      end,
+						CDStart:           eocdOffest,
+						ZipReader:         reader,
+						FileIndex:         noIndex,
+					}
+					if err != nil {
+						results <- result
+						return
+					}
 
-			unZipedFilePath, fileZipByteTotal, err := unzipFile(f, targetPath, charsetName)
-			if err != nil {
-				result.Err = err
-				results <- result
-				return
-			}
-			// 回收bytes 防止内存溢出
-			recycleBytes(f)
-			total += fileZipByteTotal
-			result.IsSuccess = true
-			result.SuccessHandleByte = fileZipByteTotal
-			result.FilePath = unZipedFilePath
-			results <- result
-			<-token
-		}(noIndex)
+					unZipedFilePath, fileZipByteTotal, err := unzipFile(f, targetPath, charsetName)
+					if err != nil {
+						result.Err = err
+						results <- result
+						return
+					}
+					// 回收bytes 防止内存溢出
+					recycleBytes(f)
+					total += fileZipByteTotal
+					result.IsSuccess = true
+					result.SuccessHandleByte = fileZipByteTotal
+					result.FilePath = unZipedFilePath
+					results <- result
+					// 结束
+					done <- 1
+				}()
+
+				// 通过chan等待完成
+				select {
+				case <-done:
+					fmt.Println("go finish!")
+				case <-ctx.Done():
+					fmt.Println("go time out!")
+					results <- &ResultProps{
+						IsSuccess:         false,
+						SuccessHandleByte: 0,
+						Err:               TimeOutErr,
+						File:              nil,
+						FileRangeStart:    start,
+						FileRangeEnd:      end,
+						CDStart:           eocdOffest,
+						ZipReader:         reader,
+						FileIndex:         noIndex,
+					}
+				case <-time.After(70 * time.Second):
+					fmt.Println("go time out2 !")
+					results <- &ResultProps{
+						IsSuccess:         false,
+						SuccessHandleByte: 0,
+						Err:               TimeOutErr,
+						File:              nil,
+						FileRangeStart:    start,
+						FileRangeEnd:      end,
+						CDStart:           eocdOffest,
+						ZipReader:         reader,
+						FileIndex:         noIndex,
+					}
+
+				}
+
+			}()
+		}
+
 	}
 	wg.Wait()
 	close(results) //关闭 并不影响接收遍历

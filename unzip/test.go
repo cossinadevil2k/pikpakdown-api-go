@@ -23,10 +23,15 @@ func test1(url string) {
 
 func main() {
 	//u1 := "https://va-trialdist.azureedge.net/stella_trial.zip"
-	u2 := "https://storage1.lathercraft.net/akabeesoft2/roleplayer2/ab2_roleplayer_tororoshimai_webtrial.zip"
+	//u2 := "https://storage1.lathercraft.net/akabeesoft2/roleplayer2/ab2_roleplayer_tororoshimai_webtrial.zip"
+	u3 := "http://mrxzz.f3322.net:10001/api/v3/file/source/625230/RJ383022.zip?sign=Lb2Mbs55vVwkwmc5ylTyFLEPx93mM1INXilHaxiDk_s%3D%3A0"
+	u3, err := myzip.GetRealUrl(u3)
+	if err != nil {
+		panic(err)
+	}
 	folder := fmt.Sprintf("%s", strconv.Itoa(int(time.Now().Unix())))
 	props := &myzip.UnzipProps{
-		Url:         u2,
+		Url:         u3,
 		UnzipAll:    true,
 		RangeStart:  1,
 		RangeEnd:    10,
